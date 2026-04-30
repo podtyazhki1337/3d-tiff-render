@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from PIL import Image as PILImage
 
 # ── Глобальные данные ─────────────────────────────────────────────────────────
 
@@ -48,7 +49,21 @@ def load_data():
                      vmax=vmax, labels=labels, colors=colors,
                      z_positions=z_pos, focal=focal, base_dist=bdist,
                      xy_um=xy_um, z_um=z_um, gap_um=gap_um))
-    status.config(text=f"Загружено: {image.shape}  instances: {len(labels)}")
+
+    # предвычисляем меши один раз
+    status.config(text="Вычисляю меши..."); root.update()
+    meshes = {}
+    for lbl in labels:
+        vol = (mask == lbl).astype(np.uint8)
+        if vol.sum() < 10: continue
+        try:
+            vol_pad = np.pad(vol, ((1,1),(1,1),(1,1)), mode="constant")
+            verts, faces, *_ = marching_cubes(vol_pad, level=0.5)
+        except Exception: continue
+        meshes[lbl] = (verts, faces)
+    data["meshes"] = meshes
+
+    status.config(text=f"Загружено: {image.shape}  instances: {len(labels)}  меши: {len(meshes)}")
     return True
 
 # ── Вычисление камеры ─────────────────────────────────────────────────────────
@@ -88,7 +103,7 @@ def apply_camera(pl):
 
 # ── Построение сцены ──────────────────────────────────────────────────────────
 
-def build_scene(pl):
+def build_scene(pl, show_img=True):
     d = data
     nz, ny, nx   = d["nz"], d["ny"], d["nx"]
     xy_um, z_um  = d["xy_um"], d["z_um"]
@@ -99,7 +114,8 @@ def build_scene(pl):
     colors       = d["colors"]
     labels       = d["labels"]
 
-    for z in range(nz):
+    if show_img:
+     for z in range(nz):
         z_pos = z_positions[z]
         sl  = (image[z].astype(np.float64) / vmax * 255).astype(np.uint8)
         rgb = np.stack([sl]*3, axis=-1).copy()
@@ -111,21 +127,20 @@ def build_scene(pl):
         plane = pv.Plane(
             center=(nx*xy_um/2, ny*xy_um/2, z_pos), direction=(0,0,1),
             i_size=nx*xy_um, j_size=ny*xy_um, i_resolution=1, j_resolution=1)
-        pl.add_mesh(plane, texture=pv.Texture(rgb[::-1]), opacity=0.95, lighting=False)
+        actor = pl.add_mesh(plane, texture=pv.Texture(rgb[::-1]), opacity=0.95, lighting=False)
+        pl._slice_actors = getattr(pl, '_slice_actors', [])
+        pl._slice_actors.append(actor)
         x1, y1 = nx*xy_um, ny*xy_um
         corners = [(0,0,z_pos),(x1,0,z_pos),(x1,y1,z_pos),(0,y1,z_pos)]
         for i in range(4):
-            pl.add_mesh(pv.Line(corners[i], corners[(i+1)%4]),
+            a = pl.add_mesh(pv.Line(corners[i], corners[(i+1)%4]),
                         color="white", line_width=0.8, opacity=0.35)
+            pl._slice_actors.append(a)
 
-    for lbl in labels:
-        vol = (mask == lbl).astype(np.uint8)
-        if vol.sum() < 10: continue
-        try:
-            vol_pad = np.pad(vol, ((1,1),(0,0),(0,0)), mode="constant")
-            verts, faces, *_ = marching_cubes(vol_pad, level=0.5)
-        except Exception: continue
-        vx = verts[:,2]*xy_um; vy = verts[:,1]*xy_um
+    meshes = d["meshes"]
+    for lbl, (verts, faces) in meshes.items():
+        vx = (verts[:,2] - 1) * xy_um
+        vy = (verts[:,1] - 1) * xy_um
         z_ext = np.concatenate([[z_positions[0]-(z_um+gap_um)], z_positions, [z_positions[-1]+(z_um+gap_um)]])
         vz  = np.interp(verts[:,0], np.arange(nz+2), z_ext)
         pts = np.column_stack([vx, vy, vz])
@@ -182,11 +197,11 @@ tif_ft  = [("TIFF files", "*.tif *.tiff"), ("All", "*.*")]
 png_ft  = [("PNG", "*.png")]
 
 img_path_var  = make_file_row(tab_files, 0, "Изображение (.tif)",
-    "C:/Users/podtyazhki/Desktop/PHD/neuronsbenchmarkArticle/data/human_neurons_dodt/images/2025-10-17_11-52-37.tif", tif_ft)
+    "C:/Users/podtyazhki/Desktop/PHD/bias/20260209_160932_pixsize.ome.tif", tif_ft)
 mask_path_var = make_file_row(tab_files, 1, "Маска (.tif)",
-    "C:/Users/podtyazhki/Desktop/PHD/neuronsbenchmarkArticle/data/human_neurons_dodt/masks/2025-10-17_11-52-37.tif", tif_ft)
+    "C:/Users/podtyazhki/Desktop/PHD/bias/20260209_160932_m_8bit.ome.tif", tif_ft)
 out_path_var  = make_file_row(tab_files, 2, "Сохранить PNG",
-    "C:/Users/podtyazhki/Desktop/PHD/neuronsbenchmarkArticle/graphical_abstract.png", png_ft, save=True)
+    "C:/Users/podtyazhki/Desktop/PHD/bias/graphical_abstract.png", png_ft, save=True)
 
 ttk.Separator(tab_files, orient="horizontal").grid(
     row=3, column=0, columnspan=3, sticky="ew", pady=10)
@@ -261,7 +276,7 @@ ttk.Separator(tab_rend, orient="horizontal").grid(
 ttk.Label(tab_rend, text="Стек", font=("Segoe UI", 10, "bold")).grid(
     row=5, column=0, columnspan=3, sticky="w", pady=(0,6))
 
-gap_var = make_slider_entry(tab_rend, 6, "Зазор между слайсами (µm)", 0, 20, 5.0)
+gap_var = make_slider_entry(tab_rend, 6, "Зазор между слайсами (µm)", 0, 20, 3.0)
 
 ttk.Separator(tab_rend, orient="horizontal").grid(
     row=7, column=0, columnspan=3, sticky="ew", pady=10)
@@ -272,6 +287,23 @@ ttk.Label(tab_rend, text="Разрешение PNG", width=24, anchor="e").grid(
 ttk.Combobox(tab_rend, textvariable=res_var, width=14, state="readonly",
     values=["1280x720","1920x1080","2560x1440","3840x2160"]).grid(
     row=9, column=1, sticky="w", pady=6)
+
+show_image_var  = tk.BooleanVar(value=True)
+transp_bg_var   = tk.BooleanVar(value=False)
+
+def toggle_image_visibility(*_):
+    pl = pl_state["pl"]
+    if pl is None or not pl_state["open"]: return
+    vis = show_image_var.get()
+    for actor in getattr(pl, "_slice_actors", []):
+        actor.SetVisibility(vis)
+    pl.render()
+
+ttk.Checkbutton(tab_rend, text="Показывать изображение", variable=show_image_var,
+                command=toggle_image_visibility).grid(
+    row=10, column=0, columnspan=3, sticky="w", padx=(80,0), pady=3)
+ttk.Checkbutton(tab_rend, text="Прозрачный фон при сохранении", variable=transp_bg_var).grid(
+    row=11, column=0, columnspan=3, sticky="w", padx=(80,0), pady=3)
 
 # ── Статус + кнопки ───────────────────────────────────────────────────────────
 
@@ -303,12 +335,36 @@ def do_open():
 def do_save():
     if not data:
         messagebox.showwarning("Нет данных", "Сначала нажми Open 3D"); return
-    w, h = [int(x) for x in res_var.get().split("x")]
-    out  = Path(out_path_var.get())
-    status.config(text=f"Сохраняю {w}×{h}..."); root.update()
-    pl = pv.Plotter(off_screen=True, window_size=[w, h])
-    build_scene(pl); apply_camera(pl)
-    pl.screenshot(str(out), return_img=False)
+    out    = Path(out_path_var.get())
+    transp = transp_bg_var.get()
+    w, h   = [int(x) for x in res_var.get().split("x")]
+
+    status.config(text=f"Рендеринг {w}×{h}..."); root.update()
+
+    # всегда рендерим в отдельный off-screen плоттер с нужным разрешением
+    show_img = show_image_var.get()
+    bg_col = [0, 0, 0]  # чёрный фон всегда — для маскировки прозрачности
+    pl2 = pv.Plotter(off_screen=True, window_size=[w, h])
+    pl2.set_background([0, 0, 0])
+    build_scene(pl2, show_img=show_img)
+    apply_camera(pl2)
+    img = pl2.screenshot(None, return_img=True)
+    pl2.close()
+
+    if transp:
+        # фон чёрный [0,0,0] → пиксели где RGB < 8 по всем каналам = фон
+        is_bg = (img[:,:,:3].astype(np.int16).max(axis=2) < 8)
+        alpha = np.where(is_bg, 0, 255).astype(np.uint8)
+        PILImage.fromarray(np.dstack([img[:,:,:3], alpha]), "RGBA").save(str(out))
+    else:
+        # пересохраняем с правильным фоном
+        pl3 = pv.Plotter(off_screen=True, window_size=[w, h])
+        pl3.set_background([0.05, 0.05, 0.07])
+        build_scene(pl3, show_img=show_img)
+        apply_camera(pl3)
+        pl3.screenshot(str(out))
+        pl3.close()
+
     status.config(text=f"Сохранено → {out.name}  ({w}×{h})")
     print(f"Saved → {out}")
 
