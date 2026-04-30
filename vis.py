@@ -343,33 +343,53 @@ def do_save():
 
     # всегда рендерим в отдельный off-screen плоттер с нужным разрешением
     show_img = show_image_var.get()
-    bg_col = [0, 0, 0]  # чёрный фон всегда — для маскировки прозрачности
-    pl2 = pv.Plotter(off_screen=True, window_size=[w, h])
-    pl2.set_background([0, 0, 0])
-    build_scene(pl2, show_img=show_img)
-    apply_camera(pl2)
-    img = pl2.screenshot(None, return_img=True)
-    pl2.close()
+
+    # рендерим всегда одинаково
+    pl3 = pv.Plotter(off_screen=True, window_size=[w, h])
+    pl3.set_background([0.05, 0.05, 0.07])
+    build_scene(pl3, show_img=show_img)
+    apply_camera(pl3)
+    pl3.screenshot(str(out))
+    pl3.close()
 
     if transp:
-        # фон чёрный [0,0,0] → пиксели где RGB < 8 по всем каналам = фон
-        is_bg = (img[:,:,:3].astype(np.int16).max(axis=2) < 8)
-        alpha = np.where(is_bg, 0, 255).astype(np.uint8)
-        PILImage.fromarray(np.dstack([img[:,:,:3], alpha]), "RGBA").save(str(out))
-    else:
-        # пересохраняем с правильным фоном
-        pl3 = pv.Plotter(off_screen=True, window_size=[w, h])
-        pl3.set_background([0.05, 0.05, 0.07])
-        build_scene(pl3, show_img=show_img)
-        apply_camera(pl3)
-        pl3.screenshot(str(out))
-        pl3.close()
+        # flood-fill от всех 4 углов → маска фона → прозрачность
+        from PIL import Image as _PIL
+        from scipy.ndimage import label as _label
+        import numpy as _np
+
+        img_arr = _np.array(_PIL.open(str(out)).convert("RGB"))
+        h_px, w_px = img_arr.shape[:2]
+
+        # фон: тёмные пиксели (все каналы < 40)
+        is_dark = img_arr.max(axis=2) < 40
+
+        # flood-fill от углов: берём только связную компоненту фона касающуюся углов
+        labeled, _ = _label(is_dark)
+        corner_labels = set()
+        for cy, cx in [(0,0),(0,w_px-1),(h_px-1,0),(h_px-1,w_px-1)]:
+            lbl = labeled[cy, cx]
+            if lbl > 0:
+                corner_labels.add(lbl)
+
+        bg_mask = _np.isin(labeled, list(corner_labels))
+        alpha = _np.where(bg_mask, 0, 255).astype(_np.uint8)
+        rgba  = _np.dstack([img_arr, alpha]).astype(_np.uint8)
+        _PIL.fromarray(rgba, "RGBA").save(str(out))
+        print(f"RGBA saved, transparent px: {(alpha==0).sum()}")
 
     status.config(text=f"Сохранено → {out.name}  ({w}×{h})")
     print(f"Saved → {out}")
 
-ttk.Button(btn_row, text="▶  Open 3D",   width=16, command=do_open).pack(side="left", padx=6, pady=4)
-ttk.Button(btn_row, text="💾  Save PNG", width=16, command=do_save).pack(side="left", padx=6, pady=4)
+def do_save_opaque():
+    transp_bg_var.set(False); do_save()
+
+def do_save_transp():
+    transp_bg_var.set(True); do_save()
+
+ttk.Button(btn_row, text="▶  Open 3D",          width=18, command=do_open).pack(side="left", padx=4, pady=4)
+ttk.Button(btn_row, text="💾  Save PNG",         width=16, command=do_save_opaque).pack(side="left", padx=4, pady=4)
+ttk.Button(btn_row, text="💾  Save PNG (RGBA)",  width=18, command=do_save_transp).pack(side="left", padx=4, pady=4)
 
 # ── Реал-тайм обновление камеры + синхронизация слайдеров ────────────────────
 
